@@ -70,17 +70,11 @@ export default function Home() {
         <div className={'border-t pt-6'}>
           <h2 className={'text-xl font-semibold mb-3'}>To reproduce:</h2>
           <ol className={'list-decimal list-inside space-y-2 text-gray-700'}>
-            <li>Run: npm install && npm run dev</li>
-            <li>
-              In another terminal, run: node --inspect-brk .heap-diagnostics/cdp.mjs snap 9229 heap-a.json
-            </li>
+            <li>Run: npm install && npm run dev:leak</li>
             <li>Visit http://localhost:3000 and interact with the dialog/menu</li>
             <li>
-              Edit this file (any change) and save repeatedly (~50 times) to trigger HMR recompiles
-            </li>
-            <li>
-              After ~50 recompiles, take another snapshot: node .heap-diagnostics/cdp.mjs snap 9229
-              heap-b.json
+              In another terminal, run: node .heap-diagnostics/trigger.mjs 50 9230 (automates
+              snapshots + recompiles; port 9230 is the dev-server child, not 9229)
             </li>
             <li>Diff the snapshots: node .heap-diagnostics/diff.mjs heap-a.json heap-b.json</li>
             <li>

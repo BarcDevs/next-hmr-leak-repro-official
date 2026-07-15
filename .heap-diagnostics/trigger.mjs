@@ -2,9 +2,10 @@
 // don't have to save manually. Takes heap snapshots before and after via CDP.
 //
 // Usage:
-//   node .heap-diagnostics/trigger.mjs [count] [port]
-//   count  – number of recompiles (default 50)
-//   port   – Node inspector port of the Next dev server child process (default 9230)
+//   node .heap-diagnostics/trigger.mjs [count] [inspectorPort] [appPort]
+//   count         – number of recompiles (default 50)
+//   inspectorPort – Node inspector port of the Next dev server child process (default 9230)
+//   appPort       – HTTP port of the Next dev server (auto-detected from 3000-3003 if omitted)
 //
 // Next.js spawns two inspector targets when started with --inspect=9229:
 //   9229 – the launcher (next bin) — NOT the leaking process
@@ -24,7 +25,29 @@ const SNAP_B = path.join(ROOT, 'heap-b.json')
 
 const count = parseInt(process.argv[2] ?? '50', 10)
 const port = process.argv[3] ?? '9230'
+const appPortArg = process.argv[4] // optional; auto-detected if omitted
 const DELAY_MS = 900 // must exceed HMR compile time; ~800ms typical
+
+// Turbopack compiles lazily: with no client requesting the page, file edits
+// trigger NOTHING (no recompile, no leak). We must request the page once to
+// compile it, then re-request after every toggle to force a recompile.
+const findAppPort = async () => {
+    if (appPortArg) return appPortArg
+    for (const p of [3000, 3001, 3002, 3003]) {
+        try {
+            const res = await fetch(`http://127.0.0.1:${p}/`, { signal: AbortSignal.timeout(3000) })
+            if (res.ok) return p
+        } catch { /* not this port */ }
+    }
+    throw new Error('No dev server found on ports 3000-3003. Pass the port as 3rd arg.')
+}
+
+let appPort
+const hitPage = async () => {
+    const res = await fetch(`http://127.0.0.1:${appPort}/`, { signal: AbortSignal.timeout(30000) })
+    await res.text()
+    if (!res.ok) throw new Error(`GET / returned ${res.status}`)
+}
 
 // ---- CDP helpers ----
 
@@ -119,6 +142,11 @@ const main = async () => {
     }
     console.log('Connected.\n')
 
+    appPort = await findAppPort()
+    console.log(`App server found on port ${appPort}. Requesting page to force initial compile...`)
+    await hitPage()
+    await sleep(2000)
+
     console.log('Taking baseline heap snapshot (heap-a.json)...')
     await snapshot(ws, SNAP_A, 10)
     const mbBefore = await heapMB(ws)
@@ -127,8 +155,9 @@ const main = async () => {
     console.log(`Triggering ${count} HMR recompiles (${DELAY_MS}ms gap each)...`)
     for (let i = 1; i <= count; i++) {
         toggleComment()
-        process.stdout.write(`\r  recompile ${i}/${count}`)
         await sleep(DELAY_MS)
+        await hitPage()
+        process.stdout.write(`\r  recompile ${i}/${count}`)
     }
     console.log('\nDone. Waiting 2s for final compile...')
     await sleep(2000)

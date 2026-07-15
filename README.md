@@ -6,9 +6,11 @@
 
 Running `next dev` on a project with frequent HMR recompiles (file edits) causes unbounded heap growth:
 
-- **Baseline**: ~105 MB heap
-- **After 50 recompiles**: ~591 MB (post-GC)
-- **Leak rate**: ~10 MB retained per recompile → ~800 recompiles to OOM on 8GB heap
+- **Baseline**: ~83 MB heap
+- **After 50 recompiles**: ~434 MB (measured immediately after, no forced GC pause)
+- **Leak rate**: ~7 MB retained per recompile → measured range across runs was ~7-10 MB/recompile
+
+> **Turbopack compiles lazily**: with no client actively requesting the page, file edits alone trigger **zero** recompiles (confirmed: 50 toggles with no page requests produced +0-1 MB heap growth and no compile activity in the server log). `trigger.mjs` accounts for this by issuing a `GET /` after every edit to force the recompile — this is why the script, not manual file saves, is the reliable way to reproduce.
 
 This occurs on **both Turbopack and webpack** bundlers in Next.js 16.2.9, making it a dev-server HMR issue, not bundler-specific.
 
@@ -16,8 +18,10 @@ This occurs on **both Turbopack and webpack** bundlers in Next.js 16.2.9, making
 
 Every HMR recompile re-instantiates the entire module graph (with HMR handler closures, feedback cells, and source text). **The prior generation is never released.** Heap diff analysis reveals:
 
-- **Module.hot HMR API method-name strings** (status, dispose, invalidate, check, accept, decline, addStatusHandler, etc.): **+57,320 over 50 recompiles ≈ 1,146 per recompile** (= one per module in the graph)
-- **Object instances, synthetic module wrappers, and closure contexts** add ~60MB across 50 recompiles
+- **Generic string/number retention**: in our measured run, the largest categories were `string Object` (+51,976, ~4.3MB), `number heap number` (+101,744, ~1.6MB), and `string WeakRef` (+47,408, ~1.4MB) over 50 recompiles — consistent with an entire prior module-graph generation (module wrappers, HMR closures, source text) staying reachable instead of being collected
+- **Synthetic/object/context churn**: synthetic wrappers, `system/Context` objects, and array-elements backing stores add several more MB across 50 recompiles
+
+Exact top-line labels vary run to run (V8 heap-snapshot categorization isn't perfectly stable), but the pattern — broad, uniform growth across module/closure/string categories proportional to recompile count — is consistent and is the smoking gun for retained module generations.
 
 ## Leak Amplifier: Radix-UI Barrel Imports
 
@@ -61,18 +65,19 @@ node .heap-diagnostics/diff.mjs heap-a.json heap-b.json
 
 ```
 ===== TOP GROWTH BY COUNT (B - A) =====
-    57320   57.3MB now=59800   string  status
-    57320   57.3MB now=59800   string  dispose
-    57320   57.3MB now=59800   string  invalidate
-    57320   57.3MB now=59800   string  check
-    57320   57.3MB now=59800   string  accept
-    57320   57.3MB now=59800   string  decline
-    57320   57.3MB now=59800   string  addStatusHandler
-    57320   57.3MB now=59800   string  addDisposeHandler
+   101744      1.6MB now=128836   number  heap number
+    51976      4.3MB now=101714   string  Object
+    47408      1.4MB now=60132   string  WeakRef
+     5197      0.2MB now=24388   string  Array
+     4730      0.4MB now=19832   array  (object elements)
+     1818      0.1MB now=23609   concatenated string  (concatenated string)
+     1614      1.0MB now=15668   synthetic
+      940      0.2MB now=1891   code  system / WeakArrayList
+      923      0.1MB now=11468   object  system / Context
     ...
 ```
 
-The smoking gun: **`module.hot` HMR API method-name strings growing by ~1,146 per recompile**, indicating the prior module graph is never released.
+(50 recompiles, heap went 83 MB → 434 MB.) The smoking gun: broad, uniform growth across strings/numbers/synthetic-wrapper/closure-context categories, scaling with recompile count — the prior module graph generation is never released.
 
 ## Measuring the Leak (Manual)
 
@@ -124,7 +129,7 @@ This reduces modules-per-recompile for UI components. The upstream leak remains,
 - **`lib/utils.ts`** — `cn()` utility for Tailwind class merging
 - **`.heap-diagnostics/cdp.mjs`** — CDP client for heap snapshots (Node 24 WebSocket/fetch, no deps)
 - **`.heap-diagnostics/diff.mjs`** — Byte-scan heapsnapshot diff (handles >536MB without stringify)
-- **`.heap-diagnostics/trigger.mjs`** — Automated recompile trigger + snapshot orchestration
+- **`.heap-diagnostics/trigger.mjs`** — Automated recompile trigger + snapshot orchestration. Also auto-fetches the page (`GET /`) after every edit, since Turbopack's lazy compilation means a file edit alone triggers no recompile without an active page request.
 
 ## Environment
 
