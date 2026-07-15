@@ -2,21 +2,23 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:leak": "cross-env NODE_OPTIONS=--inspect=9229 next dev",
     "build": "next build",
     "start": "next start"
   },
   "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.428.0",
     "next": "canary",
+    "radix-ui": "^1.4.3",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "radix-ui": "^1.4.3",
-    "lucide-react": "^0.428.0",
-    "clsx": "^2.1.1",
     "tailwind-merge": "^2.4.0"
   },
   "devDependencies": {
     "@types/node": "^22",
     "@types/react": "^19",
+    "cross-env": "^7.0.3",
     "typescript": "^5"
   }
 }

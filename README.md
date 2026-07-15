@@ -1,6 +1,6 @@
 # Next.js 16 Dev-Server HMR Module-Instance Retention Leak
 
-**Minimal reproduction of vercel/next.js#94682**: Next.js 16 dev-server crashes mid-session with `JavaScript heap out of memory` even with `--max-old-space-size=8192`.
+**Minimal reproduction of vercel/next.js#94716**: Next.js 16 dev-server crashes mid-session with `JavaScript heap out of memory` even with `--max-old-space-size=8192`.
 
 ## Issue
 
@@ -23,41 +23,36 @@ Every HMR recompile re-instantiates the entire module graph (with HMR handler cl
 
 This repo imports radix-ui components via the **umbrella barrel** (`import { Dialog as DialogPrimitive } from 'radix-ui'`), which re-exports the entire Radix library. Because the default Next.js `optimizePackageImports` does **not** include `radix-ui`, every HMR recompile of any component using UI primitives drags the full Radix barrel through the module graph.
 
-**Deliberate omission of fix**: This repo intentionally **does NOT** apply `experimental.optimizePackageImports: ['radix-ui']` in `next.config.ts`, so you can observe the leak in its full magnitude. (The fix reduces leak rate by ~18x for common edit paths.)
+**Deliberate omission of fix**: This repo intentionally **does NOT** apply `experimental.optimizePackageImports: ['radix-ui']` in `next.config.ts`, so you can observe the leak in its full magnitude.
 
 ## Quick Start
 
 ```bash
 npm install
-npm run dev
+npm run dev:leak
 ```
 
-Visit http://localhost:3000. Interact with the dialog and dropdown menu to ensure they load.
+> **`dev:leak` vs `dev`**: `dev:leak` starts Next.js with `NODE_OPTIONS=--inspect=9229`, which enables the Node inspector on the dev-server child process. This is required for heap snapshots — plain `npm run dev` will not expose a CDP port.
 
-## Measuring the Leak
+Visit http://localhost:3000 (or 3001 if 3000 is taken). Interact with the dialog and dropdown to confirm the app loads.
 
-### 1. Take baseline heap snapshot
+## Measuring the Leak (Automated)
 
-In a separate terminal (while `next dev` is running on port 3000):
+The `trigger.mjs` script handles everything: baseline snapshot → automated recompiles → post-recompile snapshot.
 
+**Terminal 1** — start the server:
 ```bash
-node --inspect .heap-diagnostics/cdp.mjs snap 9229 heap-a.json
+npm run dev:leak
 ```
 
-(The dev server inspector port defaults to 9229. Adjust if needed.)
-
-### 2. Trigger HMR recompiles
-
-Edit `app/page.tsx` — add a comment, tweak whitespace, or change the page text — then **save repeatedly** (~50–100 times). Each save triggers HMR and recompiles the app.
-
-### 3. Take a second snapshot
-
+**Terminal 2** — run the trigger (after the server prints "Ready"):
 ```bash
-node .heap-diagnostics/cdp.mjs snap 9229 heap-b.json
+node .heap-diagnostics/trigger.mjs 50 9230
 ```
 
-### 4. Diff constructor histograms
+> **Port note**: Next.js spawns two inspector targets. `9229` is the launcher process; `9230` is `start-server.js` — the actual dev server where the leak occurs. Always target `9230`.
 
+When done, diff the snapshots:
 ```bash
 node .heap-diagnostics/diff.mjs heap-a.json heap-b.json
 ```
@@ -66,13 +61,46 @@ node .heap-diagnostics/diff.mjs heap-a.json heap-b.json
 
 ```
 ===== TOP GROWTH BY COUNT (B - A) =====
-    57320   57.3MB now=59800   string (module.hot.*)
-     1280   75.7MB now=...     Object
-      462   57.3MB now=...     synthetic (module wrappers)
-   ...
+    57320   57.3MB now=59800   string  status
+    57320   57.3MB now=59800   string  dispose
+    57320   57.3MB now=59800   string  invalidate
+    57320   57.3MB now=59800   string  check
+    57320   57.3MB now=59800   string  accept
+    57320   57.3MB now=59800   string  decline
+    57320   57.3MB now=59800   string  addStatusHandler
+    57320   57.3MB now=59800   string  addDisposeHandler
+    ...
 ```
 
-The smoking gun: **`module.hot` HMR API method-name strings growing by ~1,146 per recompile**, indicating the prior module graph is retained.
+The smoking gun: **`module.hot` HMR API method-name strings growing by ~1,146 per recompile**, indicating the prior module graph is never released.
+
+## Measuring the Leak (Manual)
+
+If you prefer manual control:
+
+### 1. Start the server with inspector
+```bash
+npm run dev:leak
+```
+
+### 2. Take baseline snapshot (targets the dev server child process on port 9230)
+```bash
+node .heap-diagnostics/cdp.mjs snap 9230 heap-a.json
+```
+
+### 3. Trigger HMR recompiles
+
+Edit `app/page.tsx` — add a comment, tweak whitespace — then save **~50 times**. Each save triggers an HMR recompile.
+
+### 4. Take post-recompile snapshot
+```bash
+node .heap-diagnostics/cdp.mjs snap 9230 heap-b.json
+```
+
+### 5. Diff
+```bash
+node .heap-diagnostics/diff.mjs heap-a.json heap-b.json
+```
 
 ## Fix (Not Applied Here)
 
@@ -86,7 +114,7 @@ const nextConfig: NextConfig = {
 }
 ```
 
-This tells Next.js to tree-shake the radix-ui barrel on build, reducing modules-per-recompile for UI components. The leak itself (upstream dev-server issue) remains, but the leak rate decreases proportionally.
+This reduces modules-per-recompile for UI components. The upstream leak remains, but the rate decreases proportionally.
 
 ## Files
 
@@ -94,17 +122,18 @@ This tells Next.js to tree-shake the radix-ui barrel on build, reducing modules-
 - **`components/ui/dialog.tsx`** — radix-ui Dialog primitive wrapper (umbrella barrel import)
 - **`components/ui/dropdown-menu.tsx`** — radix-ui DropdownMenu primitive wrapper (umbrella barrel import)
 - **`lib/utils.ts`** — `cn()` utility for Tailwind class merging
-- **`.heap-diagnostics/cdp.mjs`** — CDP client for heap snapshots (Node 24 WebSocket)
-- **`.heap-diagnostics/diff.mjs`** — Byte-scan heapsnapshot diff tool (handles files > 536MB without stringify)
+- **`.heap-diagnostics/cdp.mjs`** — CDP client for heap snapshots (Node 24 WebSocket/fetch, no deps)
+- **`.heap-diagnostics/diff.mjs`** — Byte-scan heapsnapshot diff (handles >536MB without stringify)
+- **`.heap-diagnostics/trigger.mjs`** — Automated recompile trigger + snapshot orchestration
 
 ## Environment
 
-- **Next.js**: 16.2.9
+- **Next.js**: 16.2.9 (canary)
 - **React**: 19.2.7
-- **Node**: 24+ (for global WebSocket and fetch)
+- **Node**: 24+ (required for global WebSocket and fetch in CDP tools)
 - **OS**: Windows, macOS, or Linux
 
 ## References
 
-- [vercel/next.js#94682](https://github.com/vercel/next.js/issues/94682) — Original issue
+- [vercel/next.js#94716](https://github.com/vercel/next.js/issues/94716) — This issue
 - Reproduction methodology: CDP inspector + byte-scan heapsnapshot diff (no full stringify → avoids V8 536MB string-length limit)
